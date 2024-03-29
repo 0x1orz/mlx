@@ -51,7 +51,7 @@ class RNN(Module):
         self.nonlinearity = nonlinearity or Tanh
         if not callable(self.nonlinearity):
             raise ValueError(
-                f"Nonlinearity must be a Module class. Current value: {nonlinearity}."
+                f"Nonlinearity must be callable. Current value: {nonlinearity}."
             )
 
         self.hidden_size = hidden_size
@@ -71,8 +71,9 @@ class RNN(Module):
     def _extra_repr(self):
         return (
             f"input_dims={self._ih_proj.weight.shape[0]}, "
-            f"hidden_size={self.hidden_size}, "
-            f"nonlinearity={self.nonlinearity}, bias={self._ih_proj.bias}"
+            f"hidden_size={self.hidden_size}, num_layers={self.num_layers}, \n\
+                bidirectional={len(self._hh_proj)>self.num_layers}"
+            f"nonlinearity={self.nonlinearity}, bias={"bias" in self._ih_proj}"
         )
 
     def __call__(self, x, hidden=None):
@@ -156,7 +157,8 @@ class GRU(Module):
     def _extra_repr(self):
         return (
             f"input_dims={self._ih_proj.weight.shape[0]}, "
-            f"hidden_size={self.hidden_size}, bias={"bias" in self._ih_proj}"
+            f"hidden_size={self.hidden_size}, num_layers={self.num_layers}, \n\
+                bidirectional={len(self._hh_proj)>self.num_layers}, bias={"bias" in self._ih_proj}"
         )
     
     def _cell_fun(self, _hh_proj, x, h):
@@ -255,7 +257,8 @@ class LSTM(Module):
     def _extra_repr(self):
         return (
             f"input_dims={self._ih_proj.weight.shape[0]}, "
-            f"hidden_size={self.hidden_size}, num_layers={len(self._hh_proj)},bias={"bias" in self._in_proj}"
+            f"hidden_size={self.hidden_size}, num_layers={self.num_layers}, \n\
+                bidirectional={len(self._hh_proj)>self.num_layers}, bias={"bias" in self._in_proj}"
         )
     
     def _cell_fun(self, x, hidden):
