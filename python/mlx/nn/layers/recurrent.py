@@ -2,9 +2,10 @@
 
 import math
 from typing import Callable, Optional
+from functools import partial
 
 import mlx.core as mx
-from mlx.nn.layers.activations import tanh
+from mlx.nn.layers import Tanh, Linear
 from mlx.nn.layers.base import Module
 
 
@@ -40,53 +41,64 @@ class RNN(Module):
         self,
         input_size: int,
         hidden_size: int,
+        num_layers: int = 1,
+        bidirectional: bool = True,
         bias: bool = True,
         nonlinearity: Optional[Callable] = None,
     ):
         super().__init__()
 
-        self.nonlinearity = nonlinearity or tanh
+        self.nonlinearity = nonlinearity or Tanh
         if not callable(self.nonlinearity):
             raise ValueError(
-                f"Nonlinearity must be callable. Current value: {nonlinearity}."
+                f"Nonlinearity must be a Module class. Current value: {nonlinearity}."
             )
 
-        scale = 1.0 / math.sqrt(hidden_size)
         self.hidden_size = hidden_size
-        self.Wxh = mx.random.uniform(
-            low=-scale, high=scale, shape=(input_size, hidden_size)
-        )
-        self.Whh = mx.random.uniform(
-            low=-scale, high=scale, shape=(hidden_size, hidden_size)
-        )
-        self.bias = (
-            mx.random.uniform(low=-scale, high=scale, shape=(hidden_size,))
-            if bias
-            else None
-        )
+        self.num_layers = num_layers
+        self._ih_proj = Linear(input_dims=input_size, output_dims=hidden_size, bias=bias)
+
+        bidirection = 2 if bidirectional else 1
+        assert num_layers >= 1, "num_layers of the hidden layers should be more than 1."
+        self._hh_proj = [Linear(input_dims=hidden_size, output_dims=hidden_size, bias=bias) 
+                         for _ in range(bidirection*self.num_layers)]
+
+    def _cell_fun(self,_hh_proj, x):
+        x = _hh_proj(x)
+        x = self.nonlinearity(x)
+        return x
 
     def _extra_repr(self):
         return (
-            f"input_dims={self.Wxh.shape[0]}, "
+            f"input_dims={self._ih_proj.weight.shape[0]}, "
             f"hidden_size={self.hidden_size}, "
-            f"nonlinearity={self.nonlinearity}, bias={self.bias is not None}"
+            f"nonlinearity={self.nonlinearity}, bias={self._ih_proj.bias}"
         )
 
     def __call__(self, x, hidden=None):
-        if self.bias is not None:
-            x = mx.addmm(self.bias, x, self.Wxh)
-        else:
-            x = x @ self.Wxh
-
+        x = self._ih_proj(x)
+        self.hidden = hidden or self.hidden
         all_hidden = []
-        for idx in range(x.shape[-2]):
-            if hidden is not None:
-                hidden = x[..., idx, :] + hidden @ self.Whh
-            else:
-                hidden = x[..., idx, :]
-            hidden = self.nonlinearity(hidden)
-            all_hidden.append(hidden)
+        seqlen = x.shape[-2]
+        for hh_idx, hh_proj in enumerate(self._hh_proj):
+            curr_hidden = []
+            ih = self.hidden[hh_idx, :]
+            for idx in range(seqlen):
+                if len(all_hidden) ==0:
+                    if hh_idx // self.num_layers ==0:
+                        ix = x[..., idx, :]
+                    else:
+                        ix = x[..., seqlen-idx, :]
+                else:
+                    if hh_idx // self.num_layers ==0:
+                        ix = all_hidden[hh_idx-1][idx]
+                    else:
+                        ix = all_hidden[hh_idx-1][seqlen+idx]
 
+                ih = self._cell_fun(hh_proj, ix, ih)
+                curr_hidden.append(ih)
+
+            all_hidden.append(curr_hidden)
         return mx.stack(all_hidden, axis=-2)
 
 
@@ -124,75 +136,64 @@ class GRU(Module):
         self,
         input_size: int,
         hidden_size: int,
+        num_layers: int = 1,
+        bidirectional: bool = True,
         bias: bool = True,
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
-        scale = 1.0 / math.sqrt(hidden_size)
-        self.Wx = mx.random.uniform(
-            low=-scale, high=scale, shape=(input_size, 3 * hidden_size)
-        )
-        self.Wh = mx.random.uniform(
-            low=-scale, high=scale, shape=(hidden_size, 3 * hidden_size)
-        )
-        self.b = (
-            mx.random.uniform(low=-scale, high=scale, shape=(3 * hidden_size,))
-            if bias
-            else None
-        )
-        self.bhn = (
-            mx.random.uniform(low=-scale, high=scale, shape=(hidden_size,))
-            if bias
-            else None
-        )
+        self.num_layers = num_layers
+        bidirection = 2 if bidirectional else 1
+        self._ih_proj = Linear(input_size, 3*hidden_size, bias=bias)
+
+        assert num_layers >= 1, "num_layers of the hidden layers should be more than 1."
+        self.hidden = mx.zeros(bidirection*self.num_layers, self.hidden_size)
+        self._hh_proj = [Linear(hidden_size, 3*hidden_size, bias=bias) 
+                         for _ in range(bidirection*self.num_layers)]
+   
 
     def _extra_repr(self):
         return (
-            f"input_dims={self.Wx.shape[0]}, "
-            f"hidden_size={self.hidden_size}, bias={self.b is not None}"
+            f"input_dims={self._ih_proj.weight.shape[0]}, "
+            f"hidden_size={self.hidden_size}, bias={"bias" in self._ih_proj}"
         )
-
+    
+    def _cell_fun(self, _hh_proj, x, h):
+        x_rz, x_n = x[..., :-self.hidden_size], x[...,-self.hidden_size:]
+        h = _hh_proj(h)
+        h_rz, h_n = h[..., :-self.hidden_size], h[...,-self.hidden_size:]
+        rz = mx.sigmoid(x_rz + h_rz)
+        r, z= mx.split(rz, 2, axis=-1)
+        n = mx.tanh(x_n + r*h_n)
+        h = (1-z)*n + z*h
+        return h
+        
     def __call__(self, x, hidden=None):
-        if self.b is not None:
-            x = mx.addmm(self.b, x, self.Wx)
-        else:
-            x = x @ self.Wx
-
-        x_rz = x[..., : -self.hidden_size]
-        x_n = x[..., -self.hidden_size :]
-
+        x = self._ih_proj(x)
+        hidden = hidden or self.hidden
         all_hidden = []
+        seqlen = x.shape[-2]
+        for hh_idx, hh_proj in enumerate(self._hh_proj):
+            ih = hidden[hh_idx, :]
+            curr_hidden = []
+            for idx in range(seqlen):
+                if len(all_hidden) ==0:
+                    if hh_idx // self.num_layers ==0:
+                        ix = x[..., idx, :]
+                    else:
+                        ix = x[..., seqlen-idx, :]
+                else:
+                    if hh_idx // self.num_layers ==0:
+                        ix = all_hidden[hh_idx-1][idx]
+                    else:
+                        ix = all_hidden[hh_idx-1][seqlen+idx]
 
-        for idx in range(x.shape[-2]):
-            rz = x_rz[..., idx, :]
-            if hidden is not None:
-                h_proj = hidden @ self.Wh
-                h_proj_rz = h_proj[..., : -self.hidden_size]
-                h_proj_n = h_proj[..., -self.hidden_size :]
-
-                if self.bhn is not None:
-                    h_proj_n += self.bhn
-
-                rz = rz + h_proj_rz
-
-            rz = mx.sigmoid(rz)
-
-            r, z = mx.split(rz, 2, axis=-1)
-
-            n = x_n[..., idx, :]
-
-            if hidden is not None:
-                n = n + r * h_proj_n
-            n = mx.tanh(n)
-
-            hidden = (1 - z) * n
-            if hidden is not None:
-                hidden = hidden + z * hidden
-            all_hidden.append(hidden)
-
+                ih = self._cell_fun(hh_proj, ix, ih)
+                curr_hidden.append(ih)
+        all_hidden.append(curr_hidden)
         return mx.stack(all_hidden, axis=-2)
-
+    
 
 class LSTM(Module):
     r"""An LSTM recurrent layer.
@@ -231,57 +232,69 @@ class LSTM(Module):
         self,
         input_size: int,
         hidden_size: int,
+        num_layers: int,
+        bidirectional: bool = True,
         bias: bool = True,
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
-        scale = 1.0 / math.sqrt(hidden_size)
-        self.Wx = mx.random.uniform(
-            low=-scale, high=scale, shape=(input_size, 4 * hidden_size)
-        )
-        self.Wh = mx.random.uniform(
-            low=-scale, high=scale, shape=(hidden_size, 4 * hidden_size)
-        )
-        self.bias = (
-            mx.random.uniform(low=-scale, high=scale, shape=(4 * hidden_size,))
-            if bias
-            else None
-        )
+        self.num_layers = num_layers
+        bidirection = 2 if bidirectional else 1
+
+        self._ih_proj = Linear(input_size, 4*hidden_size, bias=bias)
+
+        assert num_layers >= 1, "num_layers of the hidden layers should be more than 1."
+        self._hh_proj = [Linear(hidden_size, 4*hidden_size, bias=bias) 
+                         for _ in range(self.num_layers* bidirection)]
+
+        self.hidden = mx.zeros(bidirection*self.num_layers, self.hidden_size)
+        self.cell = mx.zeros(bidirection*self.num_layers, self.hidden_size)
+        
 
     def _extra_repr(self):
         return (
-            f"input_dims={self.Wx.shape[0]}, "
-            f"hidden_size={self.hidden_size}, bias={self.bias is not None}"
+            f"input_dims={self._ih_proj.weight.shape[0]}, "
+            f"hidden_size={self.hidden_size}, num_layers={len(self._hh_proj)},bias={"bias" in self._in_proj}"
         )
+    
+    def _cell_fun(self, x, hidden):
+        h, c = hidden
+        xh = x + h
+        ifo = mx.sigmoid(xh[...,-self.hidden_size:])
+        g = mx.tanh(xh[...,:-self.hidden_size])
+        i, f, o = mx.split(ifo, 3, axis=-1)
+        c = f*c + i*g
+        h = o*mx.tanh(c)
+        return (h, c)
 
     def __call__(self, x, hidden=None, cell=None):
-        if self.bias is not None:
-            x = mx.addmm(self.bias, x, self.Wx)
-        else:
-            x = x @ self.Wx
+        x = self._ih_proj(x)
 
-        all_hidden = []
-        all_cell = []
+        all_hidden, all_cell= [], []
+        seqlen = x.shape[-2]
 
-        for idx in range(x.shape[-2]):
-            ifgo = x[..., idx, :]
-            if hidden is not None:
-                ifgo = ifgo + hidden @ self.Wh
-            i, f, g, o = mx.split(ifgo, 4, axis=-1)
+        hidden = hidden or self.hidden
+        cell = cell or self.hidden
+  
+        for hh_idx, hh_proj in enumerate(self._hh_proj):
+            ih = hidden[hh_idx, :]
+            curr_hidden, curr_cell = [], []
+            for idx in range(seqlen):
+                if len(all_hidden) ==0:
+                    if hh_idx // self.num_layers ==0:
+                        ix = x[..., idx, :]
+                    else:
+                        ix = x[..., seqlen-idx, :]
+                else:
+                    if hh_idx // self.num_layers ==0:
+                        ix = all_hidden[hh_idx-1][idx]
+                    else:
+                        ix = all_hidden[hh_idx-1][seqlen+idx]
 
-            i = mx.sigmoid(i)
-            f = mx.sigmoid(f)
-            g = mx.tanh(g)
-            o = mx.sigmoid(o)
-
-            if cell is not None:
-                cell = f * cell + i * g
-            else:
-                cell = i * g
-            hidden = o * mx.tanh(cell)
-
-            all_cell.append(cell)
-            all_hidden.append(hidden)
-
+                ih = self._cell_fun(hh_proj, ix, ih)
+                curr_hidden.append(ih[0])
+                curr_cell.append(ih[1])
+        all_hidden.append(curr_hidden)
+        all_cell.append(curr_cell)
         return mx.stack(all_hidden, axis=-2), mx.stack(all_cell, axis=-2)
