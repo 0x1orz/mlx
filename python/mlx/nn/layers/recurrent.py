@@ -63,10 +63,10 @@ class RNN(Module):
         self._hh_proj = [Linear(input_dims=hidden_size, output_dims=hidden_size, bias=bias) 
                          for _ in range(bidirection*self.num_layers)]
 
-    def _cell_fun(self,_hh_proj, x):
-        x = _hh_proj(x)
-        x = self.nonlinearity(x)
-        return x
+    def _cell_fun(self, hh_proj, x, hidden):
+        h = hh_proj(hidden) + x
+        h = self.nonlinearity(h)
+        return h
 
     def _extra_repr(self):
         return (
@@ -161,9 +161,9 @@ class GRU(Module):
                 bidirectional={len(self._hh_proj)>self.num_layers}, bias={"bias" in self._ih_proj}"
         )
     
-    def _cell_fun(self, _hh_proj, x, h):
+    def _cell_fun(self, _hh_proj, x, hideen):
         x_rz, x_n = x[..., :-self.hidden_size], x[...,-self.hidden_size:]
-        h = _hh_proj(h)
+        h = _hh_proj(hideen)
         h_rz, h_n = h[..., :-self.hidden_size], h[...,-self.hidden_size:]
         rz = mx.sigmoid(x_rz + h_rz)
         r, z= mx.split(rz, 2, axis=-1)
