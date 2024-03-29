@@ -80,27 +80,30 @@ class RNN(Module):
         x = self._ih_proj(x)
         self.hidden = hidden or self.hidden
         all_hidden = []
-        seqlen = x.shape[-2]
+        last_hidden = None
+        batch_size, seqlen = x.shape[:2]
         for hh_idx, hh_proj in enumerate(self._hh_proj):
-            curr_hidden = []
+            steps_hidden = []
             ih = self.hidden[hh_idx, :]
             for idx in range(seqlen):
 
                 if hh_idx ==0:
                     ix = x[..., idx, :] 
-                elif hh_idx == self.num_layers:
+                elif hh_idx == self.num_layers: 
                     ix = x[..., seqlen-1 - idx, :]
                 else:
-                    ix = all_hidden[-1][idx]
+                    ix = last_hidden[idx]
 
                 ih = self._cell_fun(hh_proj, ix, ih)
-                curr_hidden.append(ih)
-            if hh_idx//self.num_layers ==1 :
-                curr_hidden = curr_hidden[::-1]
-            all_hidden.append(mx.array(curr_hidden))
+                steps_hidden.append(ih)
 
-        return mx.stack(all_hidden, axis=-1)
+            if hh_idx == self.num_layers - 1:
+                all_hidden.extend(steps_hidden)
+            elif hh_idx == 2*self.num_layers - 1:
+                all_hidden.extend(steps_hidden[::-1])
 
+            last_hidden = steps_hidden
+        return mx.stack(all_hidden).reshape((seqlen, batch_size, -1))
 
 class GRU(Module):
     r"""A gated recurrent unit (GRU) RNN layer.
@@ -174,22 +177,30 @@ class GRU(Module):
         x = self._ih_proj(x)
         self.hidden = hidden or self.hidden
         all_hidden = []
-        seqlen = x.shape[-2]
+        last_hidden = None
+        batch_size, seqlen = x.shape[:2]
         for hh_idx, hh_proj in enumerate(self._hh_proj):
             ih = self.hidden[hh_idx, :]
-            curr_hidden = []
+            step_hidden = []
             for idx in range(seqlen):
                 if hh_idx ==0:
                     ix = x[..., idx, :] 
                 elif hh_idx == self.num_layers:
                     ix = x[..., seqlen-1 - idx, :]
                 else:
-                    ix = all_hidden[-1][idx]
+                    ix = last_hidden[idx]
 
                 ih = self._cell_fun(hh_proj, ix, ih)
-            curr_hidden.append(ih)
-        all_hidden.append(curr_hidden)
-        return mx.stack(all_hidden, axis=-2)
+                step_hidden.append(ih)
+                
+            if hh_idx == self.num_layers - 1:
+                all_hidden.extend(step_hidden)
+            elif hh_idx == 2*self.num_layers - 1:
+                all_hidden.extend(step_hidden[::-1])
+
+            last_hidden = step_hidden
+
+        return mx.stack(all_hidden).reshape((seqlen, batch_size, -1))
     
 
 class LSTM(Module):
@@ -270,25 +281,35 @@ class LSTM(Module):
         x = self._ih_proj(x)
 
         all_hidden, all_cell= [], []
-        seqlen = x.shape[-2]
+        last_hidden = None
+        batch_size, seqlen = x.shape[:2]
 
         self.hidden = hidden or self.hidden
         self.cell = cell or self.hidden
   
         for hh_idx, hh_proj in enumerate(self._hh_proj):
             ih = self.hidden[hh_idx, :], self.cell[hh_idx,:]
-            curr_hidden, curr_cell = [], []
+            steps_hidden, steps_cell = [], []
             for idx in range(seqlen):
                 if hh_idx ==0:
                     ix = x[..., idx, :] 
                 elif hh_idx == self.num_layers:
                     ix = x[..., seqlen-1 - idx, :]
                 else:
-                    ix = all_hidden[-1][idx]
+                    ix = last_hidden[idx]
 
                 ih = self._cell_fun(hh_proj, ix, ih)
-                curr_hidden.append(ih[0])
-                curr_cell.append(ih[1])
-        all_hidden.append(curr_hidden)
-        all_cell.append(curr_cell)
-        return mx.stack(all_hidden, axis=-2), mx.stack(all_cell, axis=-2)
+                steps_hidden.append(ih[0])
+                steps_cell.append(ih[1])
+            
+            if hh_idx == self.num_layers - 1:
+                all_hidden.extend(steps_hidden)
+                all_cell.extend(steps_cell)
+            elif hh_idx == 2*self.num_layers - 1:
+                all_hidden.extend(steps_hidden[::-1])
+                all_cell.extend(steps_cell[::-1])
+            
+            last_hidden = steps_hidden
+
+        return (mx.stack(all_hidden).reshape((seqlen, batch_size, -1)), 
+                mx.stack(all_cell).reshape((seqlen, batch_size, -1)))
