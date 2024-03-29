@@ -85,22 +85,21 @@ class RNN(Module):
             curr_hidden = []
             ih = self.hidden[hh_idx, :]
             for idx in range(seqlen):
-                if len(all_hidden) ==0:
-                    if hh_idx // self.num_layers ==0:
-                        ix = x[..., idx, :]
-                    else:
-                        ix = x[..., seqlen-idx, :]
+
+                if hh_idx ==0:
+                    ix = x[..., idx, :] 
+                elif hh_idx == self.num_layers:
+                    ix = x[..., seqlen-1 - idx, :]
                 else:
-                    if hh_idx // self.num_layers ==0:
-                        ix = all_hidden[hh_idx-1][idx]
-                    else:
-                        ix = all_hidden[hh_idx-1][seqlen+idx]
+                    ix = all_hidden[-1][idx]
 
                 ih = self._cell_fun(hh_proj, ix, ih)
                 curr_hidden.append(ih)
+            if hh_idx//self.num_layers ==1 :
+                curr_hidden = curr_hidden[::-1]
+            all_hidden.append(mx.array(curr_hidden))
 
-            all_hidden.append(curr_hidden)
-        return mx.stack(all_hidden, axis=-2)
+        return mx.stack(all_hidden, axis=-1)
 
 
 class GRU(Module):
@@ -173,26 +172,22 @@ class GRU(Module):
         
     def __call__(self, x, hidden=None):
         x = self._ih_proj(x)
-        hidden = hidden or self.hidden
+        self.hidden = hidden or self.hidden
         all_hidden = []
         seqlen = x.shape[-2]
         for hh_idx, hh_proj in enumerate(self._hh_proj):
-            ih = hidden[hh_idx, :]
+            ih = self.hidden[hh_idx, :]
             curr_hidden = []
             for idx in range(seqlen):
-                if len(all_hidden) ==0:
-                    if hh_idx // self.num_layers ==0:
-                        ix = x[..., idx, :]
-                    else:
-                        ix = x[..., seqlen-idx, :]
+                if hh_idx ==0:
+                    ix = x[..., idx, :] 
+                elif hh_idx == self.num_layers:
+                    ix = x[..., seqlen-1 - idx, :]
                 else:
-                    if hh_idx // self.num_layers ==0:
-                        ix = all_hidden[hh_idx-1][idx]
-                    else:
-                        ix = all_hidden[hh_idx-1][seqlen+idx]
+                    ix = all_hidden[-1][idx]
 
                 ih = self._cell_fun(hh_proj, ix, ih)
-                curr_hidden.append(ih)
+            curr_hidden.append(ih)
         all_hidden.append(curr_hidden)
         return mx.stack(all_hidden, axis=-2)
     
@@ -277,23 +272,19 @@ class LSTM(Module):
         all_hidden, all_cell= [], []
         seqlen = x.shape[-2]
 
-        hidden = hidden or self.hidden
-        cell = cell or self.hidden
+        self.hidden = hidden or self.hidden
+        self.cell = cell or self.hidden
   
         for hh_idx, hh_proj in enumerate(self._hh_proj):
-            ih = hidden[hh_idx, :]
+            ih = self.hidden[hh_idx, :], self.cell[hh_idx,:]
             curr_hidden, curr_cell = [], []
             for idx in range(seqlen):
-                if len(all_hidden) ==0:
-                    if hh_idx // self.num_layers ==0:
-                        ix = x[..., idx, :]
-                    else:
-                        ix = x[..., seqlen-idx, :]
+                if hh_idx ==0:
+                    ix = x[..., idx, :] 
+                elif hh_idx == self.num_layers:
+                    ix = x[..., seqlen-1 - idx, :]
                 else:
-                    if hh_idx // self.num_layers ==0:
-                        ix = all_hidden[hh_idx-1][idx]
-                    else:
-                        ix = all_hidden[hh_idx-1][seqlen+idx]
+                    ix = all_hidden[-1][idx]
 
                 ih = self._cell_fun(hh_proj, ix, ih)
                 curr_hidden.append(ih[0])
