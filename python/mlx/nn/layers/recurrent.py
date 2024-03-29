@@ -2,10 +2,10 @@
 
 import math
 from typing import Callable, Optional
-from functools import partial
 
 import mlx.core as mx
-from mlx.nn.layers import Tanh, Linear
+from mlx.nn.layers.activations import tanh
+from mlx.nn.layers import Linear
 from mlx.nn.layers.base import Module
 
 
@@ -48,7 +48,7 @@ class RNN(Module):
     ):
         super().__init__()
 
-        self.nonlinearity = nonlinearity or Tanh
+        self.nonlinearity = nonlinearity or tanh
         if not callable(self.nonlinearity):
             raise ValueError(
                 f"Nonlinearity must be callable. Current value: {nonlinearity}."
@@ -59,7 +59,9 @@ class RNN(Module):
         self._ih_proj = Linear(input_dims=input_size, output_dims=hidden_size, bias=bias)
 
         bidirection = 2 if bidirectional else 1
+
         assert num_layers >= 1, "num_layers of the hidden layers should be more than 1."
+        self.hidden = mx.zeros((bidirection*self.num_layers, hidden_size))
         self._hh_proj = [Linear(input_dims=hidden_size, output_dims=hidden_size, bias=bias) 
                          for _ in range(bidirection*self.num_layers)]
 
@@ -253,11 +255,12 @@ class LSTM(Module):
         self._ih_proj = Linear(input_size, 4*hidden_size, bias=bias)
 
         assert num_layers >= 1, "num_layers of the hidden layers should be more than 1."
+        self.hidden = mx.zeros(bidirection*self.num_layers, self.hidden_size)
+        self.cell = mx.zeros(bidirection*self.num_layers, self.hidden_size)
+        
         self._hh_proj = [Linear(hidden_size, 4*hidden_size, bias=bias) 
                          for _ in range(self.num_layers* bidirection)]
 
-        self.hidden = mx.zeros(bidirection*self.num_layers, self.hidden_size)
-        self.cell = mx.zeros(bidirection*self.num_layers, self.hidden_size)
         
 
     def _extra_repr(self):
