@@ -1,59 +1,35 @@
-# Copyright © 2023-2024 Apple Inc.
-
 from typing import Callable, Optional, override
-from itertools import chain
 import mlx.core as mx
 import numpy as np
 from mlx.nn.layers.activations import tanh
 from mlx.nn.layers import Linear
 from mlx.nn.layers.base import Module
 
-class RecurrentBase(Module):
+class RNNBase(Module):
     def __init__(
         self,
         input_size: int,
         hidden_size: int,
-        num_layers: int = 1,
-        bidirectional: bool = True,
-        bias: bool = True,):
+        bias: bool = True):
         super().__init__()
         
         self.hidden_size = hidden_size
-        self.num_bidirections = 2 if bidirectional else 1
-        self.num_layers = num_layers
+        self.hh_proj: Module = None
 
-        self._ih_proj: Module = None
-
-        assert num_layers >= 1, "num_layers of the hidden layers should be more than 1."
-        self.h_0 : mx.array = mx.zeros((self.num_bidirections * self.num_layers, hidden_size))
+        self.h_0 : mx.array = mx.zeros((1, hidden_size))
         self.h_n : mx.array = None
-        self._hh_proj : Module = None
-
-    @property
-    def weight_ih(self):
-        return [layer.weight for layer in self._ih_proj]
-    @property
-    def weight_hh(self):
-        weights = [layer.weight for layer in self._hh_proj[:self.num_layers]]
-        return weights
-    @property
-    def weight_hh_reverse(self):
-        weights = [layer.weight for layer in self._hh_proj[self.num_layers:]]
-        return weights
+        self.hh_proj : Module = None
     
     def _extra_repr(self):
         return (
-            f"input_dims={[weight.shape for weight in self.weight_ih]},\n"
-            f"hidden_size={[weight.shape for weight in self.weight_hh]},\n\
-                num_layers={self.num_layers}, bias={"bias" in self._in_proj},\n\
-                bidirectional={len(self._hh_proj)>self.num_layers}"
+            f"\ninput_dims={self.hh_proj.weight.shape}, hidden_size={self.hh_proj.weight.shape}, bias={"bias" in self.ih_proj},"
         )
     
     @override
     def _cell_fun(self, hh_proj, x, states):
         raise NotImplementedError
     
-class RNN(RecurrentBase):
+class ElmanRNN(RNNBase):
     r"""An Elman recurrent layer.
 
     The input is a sequence of shape ``NLD`` or ``LD`` where:
@@ -85,17 +61,13 @@ class RNN(RecurrentBase):
         self,
         input_size: int,
         hidden_size: int,
-        num_layers: int = 1,
-        bidirectional: bool = True,
         bias: bool = True,
         nonlinearity: Optional[Callable] = None,
     ):
-        super().__init__(input_size, hidden_size, num_layers, bidirectional, bias)
+        super().__init__(input_size, hidden_size, bias)
 
-        _ih_input_size = np.array([[input_size] + [hidden_size]* (num_layers - 1)] * self.num_bidirections).flatten()
-        self._ih_proj = [Linear(m, hidden_size, bias=bias) for m in _ih_input_size]
-        _hh_input_size = [hidden_size] * self.num_bidirections * self.num_layers
-        self._hh_proj = [Linear(m, hidden_size, bias) for m in _hh_input_size]
+        self.ih_proj = Linear(input_size, hidden_size, bias=bias)
+        self.hh_proj = Linear(hidden_size, hidden_size, bias=bias)
 
         self.nonlinearity = nonlinearity or tanh
         if not callable(self.nonlinearity):
@@ -110,36 +82,20 @@ class RNN(RecurrentBase):
 
     def __call__(self, x, hidden=None):
         self.h_0 = hidden or self.h_0
-        all_hidden, h_n = [], []
-        last_h = None
+        all_hidden = []
+
         batch_size, seq_len = x.shape[:2]
-        for proj_idx, hh_proj in enumerate(self._hh_proj):
-            steps_h = []
-            ih = mx.expand_dims(self.h_0[proj_idx, :], 0)
-            for idx in range(seq_len):
-
-                if proj_idx == 0:
-                    ix = x[..., idx, :] 
-                elif proj_idx == self.num_layers: 
-                    ix = x[..., seq_len-1 - idx, :]
-                else:
-                    ix = last_h[idx]
-                ix = self._ih_proj[proj_idx](ix)
-                ih = self._cell_fun(hh_proj, ix, ih)
-                steps_h.append(ih)
-            h_n.append(ih)
-
-            if proj_idx == self.num_layers - 1:
-                all_hidden.extend(steps_h)
-            elif proj_idx == 2*self.num_layers - 1:
-                all_hidden.extend(steps_h[::-1])
-
-            last_h = steps_h
-        self.h_n = mx.stack(h_n)
+        x = self.ih_proj(x)
+        ih = mx.expand_dims(self.h_0, 0)
+        for idx in range(seq_len):
+            ix = x[..., idx, :] 
+            ih = self._cell_fun(self.hh_proj, ix, ih)
+            all_hidden.appen(ih)
+        self.h_n = ih
 
         return mx.stack(all_hidden).reshape((seq_len, batch_size, -1)), self.h_n
 
-class GRU(RecurrentBase):
+class GRU(RNNBase):
     r"""A gated recurrent unit (GRU) RNN layer.
 
     The input has shape ``NLD`` or ``LD`` where:
@@ -173,17 +129,12 @@ class GRU(RecurrentBase):
         self,
         input_size: int,
         hidden_size: int,
-        num_layers: int = 1,
-        bidirectional: bool = True,
         bias: bool = True,
     ):
-        super().__init__(input_size, hidden_size, num_layers, bidirectional, bias)
+        super().__init__(input_size, hidden_size, bias)
 
-        repeat_num = 3
-        _ih_input_size = np.array([[input_size] + [hidden_size]* (num_layers - 1)] * self.num_bidirections).flatten()
-        self._ih_proj = [Linear(m, repeat_num * hidden_size, bias=bias) for m in _ih_input_size]
-        _hh_input_size = [hidden_size] * self.num_bidirections * self.num_layers
-        self._hh_proj = [Linear(m, repeat_num * hidden_size, bias=bias) for m in _hh_input_size]
+        self._ih_proj = Linear(input_size, 3 * hidden_size, bias=bias)
+        self.hh_proj = Linear(hidden_size, 3 * hidden_size, bias=bias)
 
     
     def _cell_fun(self, hh_proj, x, states):
@@ -198,37 +149,22 @@ class GRU(RecurrentBase):
         
     def __call__(self, x, hidden=None):
         self.h_0 = hidden or self.h_0
-        all_hidden, h_n = [], []
-        last_h = None
+        all_hidden = []
+
         batch_size, seq_len = x.shape[:2]
-        for proj_idx, hh_proj in enumerate(self._hh_proj):
-            ih = mx.expand_dims(self.h_0[proj_idx, :], 0)
-            step_h = []
-            for idx in range(seq_len):
-                if proj_idx ==0:
-                    ix = x[..., idx, :] 
-                elif proj_idx == self.num_layers:
-                    ix = x[..., seq_len-1 - idx, :]
-                else:
-                    ix =last_h[idx]
-                ix = self._ih_proj[proj_idx](ix)
-                ih = self._cell_fun(hh_proj, ix, ih)
-                step_h.append(ih)
-            h_n.append(ih)
-             
-            if proj_idx == self.num_layers - 1:
-                all_hidden.extend(step_h)
-            elif proj_idx == 2*self.num_layers - 1:
-                all_hidden.extend(step_h[::-1])
 
-            last_h = step_h
-
-        self.h_n = mx.stack(h_n)
+        x = self._ih_proj(x)
+        ih = mx.expand_dims(self.h_0, 0)
+        for idx in range(seq_len):
+            ix = x[..., idx, :] 
+            ih = self._cell_fun(self.hh_proj, ix, ih)
+            all_hidden.append(ih)
+        self.h_n = ih
 
         return mx.stack(all_hidden).reshape((seq_len, batch_size, -1)), self.h_n
     
 
-class LSTM(RecurrentBase):
+class LSTM(RNNBase):
     r"""An LSTM recurrent layer.
 
     The input has shape ``NLD`` or ``LD`` where:
@@ -265,23 +201,17 @@ class LSTM(RecurrentBase):
         self,
         input_size: int,
         hidden_size: int,
-        num_layers: int,
-        bidirectional: bool = True,
         bias: bool = True,
     ):
-        super().__init__(input_size, hidden_size, num_layers, bidirectional, bias)
+        super().__init__(input_size, hidden_size, bias)
 
-        repeat_num = 4
-        _ih_input_size = np.array([[input_size] + [hidden_size]* (num_layers - 1)] * self.num_bidirections).flatten()
-        self._ih_proj = [Linear(m, repeat_num * hidden_size, bias=bias) for m in _ih_input_size]
-        _hh_input_size = [hidden_size] * self.num_bidirections * self.num_layers
-        self._hh_proj = [Linear(m, repeat_num * hidden_size, bias) for m in _hh_input_size]
+        self.ih_proj = Linear(input_size, 4 * hidden_size, bias=bias)
+        self.hh_proj = Linear(hidden_size, 4 * hidden_size, bias=bias)
         
-
         self.c_0 = mx.zeros_like(self.h_0)
         self.c_n = None
             
-    def _cell_fun(self,hh_proj, x, states):
+    def _cell_fun(self, hh_proj, x, states):
         h, c = states
         xh = hh_proj(h) + x
         ifo = mx.sigmoid(xh[..., :-self.hidden_size])
@@ -292,45 +222,22 @@ class LSTM(RecurrentBase):
         return (h, c)
 
     def __call__(self, x, hidden=None, cell=None):
-    
+
+        self.h_0 = hidden or self.h_0
+        self.c_0 = cell or self.c_0
         all_hidden, all_cell = [], []
-        h_n, c_n = [], []
-        last_h = None
-        batch_size, seq_len = x.shape[:2]
+        
+        ih = self.h_0
+        ic = self.c_0
 
-        h_0 = hidden or self.h_0
-        c_0 = cell or self.h_0
-  
-        for proj_idx, hh_proj in enumerate(self._hh_proj):
-            ih = (mx.expand_dims(h_0[proj_idx, :], 0), 
-                  mx.expand_dims(c_0[proj_idx,:],0))
-            steps_h, step_c = [], []
-            for idx in range(seq_len):
-                if proj_idx ==0:
-                    ix = x[..., idx, :] 
-                elif proj_idx == self.num_layers:
-                    ix = x[..., seq_len-1 - idx, :]
-                else:
-                    ix = last_h[idx]
-
-                ix = self._ih_proj[proj_idx](ix)
-                ih = self._cell_fun(hh_proj, ix, ih)
-
-                steps_h.append(ih[0])
-                step_c.append(ih[1])
-
-            h_n.append(ih[0])
-            c_n.append(ih[1])
-
-            if proj_idx == self.num_layers - 1:
-                all_hidden.extend(steps_h)
-                all_cell.extend(step_c)
-            elif proj_idx == 2*self.num_layers - 1:
-                all_hidden.extend(steps_h[::-1])
-                all_cell.extend(step_c[::-1])
+        x = self.ih_proj(x)
+        for idx in range(x.shape[-2]):
+            ix = x[..., idx, :] 
+            ih, ic = self._cell_fun(self.hh_proj, ix, (ih, ic))
+            all_hidden.append(ih)
+            all_cell.append(ic)
             
-            last_h = steps_h
-        self.h_n = mx.stack(h_n)
-        self.c_n = mx.stack(c_n)
+        self.h_n = ih
+        self.c_n = ic
 
-        return mx.stack(all_hidden).reshape((seq_len, batch_size, -1)), (self.h_n, self.c_n)
+        return  mx.stack(all_hidden), mx.stack(all_cell)
