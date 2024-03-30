@@ -75,8 +75,8 @@ class ElmanRNN(RNNBase):
                 f"Nonlinearity must be callable. Current value: {nonlinearity}."
             )
 
-    def _cell_fun(self, hh_proj, x, states):
-        h = hh_proj(states) + x
+    def _cell_fun(self, x, states):
+        h = states + x
         h = self.nonlinearity(h)
         return h
 
@@ -88,9 +88,10 @@ class ElmanRNN(RNNBase):
         x = self.ih_proj(x)
         ih = mx.expand_dims(self.h_0, 0)
         for idx in range(seq_len):
-            ix = x[..., idx, :] 
-            ih = self._cell_fun(self.hh_proj, ix, ih)
-            all_hidden.appen(ih)
+            ix = x[..., idx, :]
+            ih = self.hh_proj(ih)
+            ih = self._cell_fun(ix, ih)
+            all_hidden.append(ih)
         self.h_n = ih
 
         return mx.stack(all_hidden).reshape((seq_len, batch_size, -1)), self.h_n
@@ -133,14 +134,13 @@ class GRU(RNNBase):
     ):
         super().__init__(input_size, hidden_size, bias)
 
-        self._ih_proj = Linear(input_size, 3 * hidden_size, bias=bias)
+        self.ih_proj = Linear(input_size, 3 * hidden_size, bias=bias)
         self.hh_proj = Linear(hidden_size, 3 * hidden_size, bias=bias)
 
     
-    def _cell_fun(self, hh_proj, x, states):
+    def _cell_fun(self,  x, states):
         x_rz, x_n = x[..., :-self.hidden_size], x[..., -self.hidden_size:]
-        h = hh_proj(states)
-        h_rz, h_n = h[..., :-self.hidden_size], h[..., -self.hidden_size:]
+        h_rz, h_n = states[..., :-self.hidden_size], states[..., -self.hidden_size:]
         rz = mx.sigmoid(x_rz + h_rz)
         r, z= mx.split(rz, 2, axis=-1)
         n = mx.tanh(x_n + r*h_n)
@@ -153,11 +153,12 @@ class GRU(RNNBase):
 
         batch_size, seq_len = x.shape[:2]
 
-        x = self._ih_proj(x)
+        x = self.ih_proj(x)
         ih = mx.expand_dims(self.h_0, 0)
         for idx in range(seq_len):
-            ix = x[..., idx, :] 
-            ih = self._cell_fun(self.hh_proj, ix, ih)
+            ix = x[..., idx, :]
+            ih = self.hh_proj(ih)
+            ih = self._cell_fun(ix, ih)
             all_hidden.append(ih)
         self.h_n = ih
 
@@ -210,12 +211,12 @@ class LSTM(RNNBase):
         
         self.c_0 = mx.zeros_like(self.h_0)
         self.c_n = None
-            
-    def _cell_fun(self, hh_proj, x, states):
+
+    def _cell_fun(self, x, states):
         h, c = states
-        xh = hh_proj(h) + x
-        ifo = mx.sigmoid(xh[..., :-self.hidden_size])
-        g = mx.tanh(xh[..., -self.hidden_size:])
+        hx = h + x
+        ifo = mx.sigmoid(hx[..., :-self.hidden_size])
+        g = mx.tanh(hx[..., -self.hidden_size:])
         i, f, o = mx.split(ifo, 3, axis=-1)
         c = f*c + i*g
         h = o*mx.tanh(c)
@@ -232,8 +233,9 @@ class LSTM(RNNBase):
 
         x = self.ih_proj(x)
         for idx in range(x.shape[-2]):
-            ix = x[..., idx, :] 
-            ih, ic = self._cell_fun(self.hh_proj, ix, (ih, ic))
+            ix = x[..., idx, :]
+            ih = self.hh_proj(ih)
+            ih, ic = self._cell_fun(ix, (ih, ic))
             all_hidden.append(ih)
             all_cell.append(ic)
             
