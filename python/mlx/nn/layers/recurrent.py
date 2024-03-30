@@ -26,9 +26,45 @@ class RNNBase(Module):
         )
     
     @override
-    def _cell_fun(self, hh_proj, x, states):
+    def _cell_fun(self, x, init_states):
         raise NotImplementedError
-    
+
+class StackedRNN(Module):
+    def __init__(
+        self,
+        base : Module,
+        input_size : int,
+        hidden_size : int,
+        num_layers : int = 1,
+        bias : bool = True,
+        ):
+        super().__init__()
+
+        self.base_rnn = base(input_size, hidden_size, bias)
+        self.ext_rnns = [base(hidden, hidden_size, bias) for _ in range(num_layers -1)]
+
+    def __call__(self, x, init_states=None):
+        hidden, base_states = self.base_rnn(x, init_states)
+        for layer in self.ext_rnns:
+            hidden, states = layer(hidden, init_states)
+        return hidden, states
+
+class BiRNN(Module):
+    def __init__(
+        self,
+        base : Module,
+    ):
+        super().__init__()
+        self.fw_rnn = base
+        self.bk_rnn = copy(base)
+
+    def __call__(self, x, init_states):
+        fw_hidden, fw_states = self.fw_rnn(x, init_states)
+        bk_hidden, bk_states = self.bk_rnn(x[-1, ::-1, ...], init_states)
+        all_hidden = mx.concatenate(fw_hidden, bk_hidden[-1, ::-1, ...], axis=-1)
+        all_states = mx.concatenate(fw_hidden, bk_states[-1, ::-1, ...], axis=-1)
+        return all_hidden, all_states
+
 class ElmanRNN(RNNBase):
     r"""An Elman recurrent layer.
 
@@ -80,21 +116,20 @@ class ElmanRNN(RNNBase):
         h = self.nonlinearity(h)
         return h
 
-    def __call__(self, x, hidden=None):
-        self.h_0 = hidden or self.h_0
+    def __call__(self, x, init_states=None):
+        self.h_0 = init_states or self.h_0
         all_hidden = []
 
-        batch_size, seq_len = x.shape[:2]
         x = self.ih_proj(x)
-        ih = mx.expand_dims(self.h_0, 0)
-        for idx in range(seq_len):
+        ih = self.h_0
+        for idx in range(x.shape[-2]):
             ix = x[..., idx, :]
             ih = self.hh_proj(ih)
             ih = self._cell_fun(ix, ih)
             all_hidden.append(ih)
         self.h_n = ih
 
-        return mx.stack(all_hidden).reshape((seq_len, batch_size, -1)), self.h_n
+        return mx.stack(all_hidden), self.h_n
 
 class GRU(RNNBase):
     r"""A gated recurrent unit (GRU) RNN layer.
@@ -147,22 +182,20 @@ class GRU(RNNBase):
         h = (1-z)*n + z*h_n
         return h
         
-    def __call__(self, x, hidden=None):
-        self.h_0 = hidden or self.h_0
+    def __call__(self, x, init_states=None):
+        self.h_0 = init_states or self.h_0
         all_hidden = []
 
-        batch_size, seq_len = x.shape[:2]
-
         x = self.ih_proj(x)
-        ih = mx.expand_dims(self.h_0, 0)
-        for idx in range(seq_len):
+        ih = self.h_0
+        for idx in range(x.shape[-2]):
             ix = x[..., idx, :]
             ih = self.hh_proj(ih)
             ih = self._cell_fun(ix, ih)
             all_hidden.append(ih)
         self.h_n = ih
 
-        return mx.stack(all_hidden).reshape((seq_len, batch_size, -1)), self.h_n
+        return mx.stack(all_hidden), self.h_n
     
 
 class LSTM(RNNBase):
@@ -222,8 +255,8 @@ class LSTM(RNNBase):
         h = o*mx.tanh(c)
         return (h, c)
 
-    def __call__(self, x, hidden=None, cell=None):
-
+    def __call__(self, x, init_states=(None, None)):
+        hidden, cell = init_states
         self.h_0 = hidden or self.h_0
         self.c_0 = cell or self.c_0
         all_hidden, all_cell = [], []
@@ -242,4 +275,4 @@ class LSTM(RNNBase):
         self.h_n = ih
         self.c_n = ic
 
-        return  mx.stack(all_hidden), mx.stack(all_cell)
+        return  mx.stack(all_hidden, axis=2), self.c_n
