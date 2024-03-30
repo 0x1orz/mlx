@@ -1,6 +1,6 @@
 from typing import Callable, Optional, override
 import mlx.core as mx
-import numpy as np
+from mlx.nn import init
 from mlx.nn.layers.activations import tanh
 from mlx.nn.layers import Linear
 from mlx.nn.layers.base import Module
@@ -40,7 +40,7 @@ class StackedRNN(Module):
         ):
         super().__init__()
 
-        self.base_rnn = base(input_size, hidden_size, bias)
+        self.models = base(input_size, hidden_size, bias)
         self.ext_rnns = [base(hidden, hidden_size, bias) for _ in range(num_layers -1)]
 
     def __call__(self, x, init_states=None):
@@ -56,13 +56,13 @@ class BiRNN(Module):
     ):
         super().__init__()
         self.fw_rnn = base
-        self.bk_rnn = copy(base)
+        self.bk_rnn = copy(base).apply_to_modules(init.uniform)
 
     def __call__(self, x, init_states):
         fw_hidden, fw_states = self.fw_rnn(x, init_states)
         bk_hidden, bk_states = self.bk_rnn(x[-1, ::-1, ...], init_states)
-        all_hidden = mx.concatenate(fw_hidden, bk_hidden[-1, ::-1, ...], axis=-1)
-        all_states = mx.concatenate(fw_hidden, bk_states[-1, ::-1, ...], axis=-1)
+        all_hidden = mx.concatenate([fw_hidden, bk_hidden[-1, ::-1, ...]], axis=-1)
+        all_states = mx.concatenate([fw_states, bk_states[-1, ::-1, ...]], axis=-1)
         return all_hidden, all_states
 
 class ElmanRNN(RNNBase):
